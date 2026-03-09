@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environment
+.venv/
+
+# uv
+uv.lock
+
+# Environment / secrets
+.env
+.env.*
+
+# Personal vault content (notes are private)
+vault/personal/
+vault/teams/
+vault/0-Inbox/
+vault/1-Projects/
+vault/2-Areas/
+vault/3-Resources/
+vault/4-Archive/
+
+# Keep Templates as examples
+!vault/Templates/
+
+# IDE
+.vscode/
+.idea/
+
+# pytest
+.pytest_cache/
+
+# Claude
+.claude/
