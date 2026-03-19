@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 
 import pytest
 import yaml
 
+from notetrans.config import DEFAULT_CONFIG
 from notetrans.organizer import (
     DELETE,
     ClassifyResult,
@@ -60,7 +62,7 @@ class TestFrontmatter:
 
 
 # ---------------------------------------------------------------------------
-# Classification tests
+# Classification tests (default config)
 # ---------------------------------------------------------------------------
 
 class TestClassifyNote:
@@ -122,7 +124,7 @@ class TestClassifyNote:
         assert "topic/kv-cache" in result.tags_to_add
 
     def test_journal(self, tmp_path):
-        path = _make_note(tmp_path, "今日排程", "今日排程")
+        path = _make_note(tmp_path, "\u4eca\u65e5\u6392\u7a0b", "\u4eca\u65e5\u6392\u7a0b")
         result = classify_note(path)
         assert result.dest_folder == "4-Archive/journal"
 
@@ -145,6 +147,74 @@ class TestClassifyNote:
         assert "topic/moa" in result.tags_to_add
         assert "topic/moe" in result.tags_to_add
         assert "topic/llm-inference" in result.tags_to_add
+
+
+# ---------------------------------------------------------------------------
+# Classification tests with custom config
+# ---------------------------------------------------------------------------
+
+class TestClassifyNoteCustomConfig:
+    def _custom_config(self) -> dict:
+        """Return a config with a single custom rule."""
+        return {
+            "organizer": {
+                "rules": [
+                    {
+                        "name": "devops",
+                        "destination": "1-Projects/devops",
+                        "keywords": ["CI/CD", "pipeline", "Terraform"],
+                        "case_sensitive": False,
+                    },
+                ],
+                "topics": [
+                    {"pattern": "kubernetes", "tag": "topic/k8s"},
+                ],
+                "folder_tags": {
+                    "1-Projects/devops": "type/devops",
+                },
+                "delete_empty": True,
+                "empty_min_chars": 10,
+                "untitled_min_chars": 100,
+                "inbox_folder": "0-Inbox",
+            },
+        }
+
+    def test_custom_rule_matches(self, tmp_path):
+        path = _make_note(tmp_path, "Terraform pipeline setup", "Terraform pipeline setup")
+        config = self._custom_config()
+        result = classify_note(path, config=config)
+        assert result.dest_folder == "1-Projects/devops"
+        assert "type/devops" in result.tags_to_add
+
+    def test_custom_rule_fallback_inbox(self, tmp_path):
+        path = _make_note(tmp_path, "Random thoughts 2024", "Random thoughts 2024")
+        config = self._custom_config()
+        result = classify_note(path, config=config)
+        assert result.dest_folder == "0-Inbox"
+
+    def test_custom_topic_tags(self, tmp_path):
+        path = _make_note(
+            tmp_path, "K8s setup", "K8s setup",
+            "We deployed kubernetes on the cluster."
+        )
+        config = self._custom_config()
+        result = classify_note(path, config=config)
+        assert "topic/k8s" in result.tags_to_add
+
+    def test_custom_inbox_folder(self, tmp_path):
+        config = self._custom_config()
+        config["organizer"]["inbox_folder"] = "99-Uncategorized"
+        path = _make_note(tmp_path, "Something else", "Something else")
+        result = classify_note(path, config=config)
+        assert result.dest_folder == "99-Uncategorized"
+
+    def test_delete_empty_disabled(self, tmp_path):
+        config = self._custom_config()
+        config["organizer"]["delete_empty"] = False
+        path = _make_note(tmp_path, "empty", "Untitled", "")
+        result = classify_note(path, config=config)
+        # Should NOT be deleted when delete_empty is False
+        assert result.dest_folder != DELETE
 
 
 # ---------------------------------------------------------------------------
@@ -195,3 +265,34 @@ class TestOrganizeVault:
     def test_source_dir_not_found(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             organize_vault(tmp_path, source_dir="nonexistent")
+
+    def test_organize_with_custom_config(self, tmp_path):
+        """Organize vault using a custom config with different rules."""
+        personal = tmp_path / "personal"
+        personal.mkdir()
+        _make_note(personal, "Terraform setup", "Terraform setup")
+
+        config = {
+            "organizer": {
+                "rules": [
+                    {
+                        "name": "infra",
+                        "destination": "1-Projects/infra",
+                        "keywords": ["Terraform", "Ansible"],
+                        "case_sensitive": False,
+                    },
+                ],
+                "topics": [],
+                "folder_tags": {},
+                "delete_empty": True,
+                "empty_min_chars": 10,
+                "untitled_min_chars": 100,
+                "inbox_folder": "0-Inbox",
+            },
+        }
+
+        results, stats = organize_vault(
+            tmp_path, source_dir="personal", dry_run=False, config=config,
+        )
+        assert stats.moved == 1
+        assert (tmp_path / "1-Projects/infra/Terraform setup.md").exists()

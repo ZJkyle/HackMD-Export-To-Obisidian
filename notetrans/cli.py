@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import click
 from dotenv import load_dotenv
 
 from notetrans.client import HackMDClient
-from notetrans.exporter import export_notes
+from notetrans.config import DEFAULT_CONFIG_PATH, generate_default_config, load_config
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_token(token: str | None) -> str:
@@ -22,13 +25,32 @@ def _resolve_token(token: str | None) -> str:
     env_token = os.environ.get("HACKMD_TOKEN", "")
     if env_token:
         return env_token
-    click.echo("Error: No token provided. Use --token, HACKMD_TOKEN env var, or .env file.", err=True)
+    logger.error("No token provided. Use --token, HACKMD_TOKEN env var, or .env file.")
     sys.exit(1)
 
 
 @click.group()
-def cli() -> None:
+@click.option(
+    "--config",
+    "config_path",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Path to YAML config file (default: ~/.config/notetrans/config.yaml).",
+)
+@click.option("--verbose", "-v", is_flag=True, help="Enable debug logging.")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress info messages (WARNING and above only).")
+@click.pass_context
+def cli(ctx: click.Context, config_path: Path | None, verbose: bool, quiet: bool) -> None:
     """notetrans - Export HackMD notes to Obsidian-compatible Markdown."""
+    # Configure logging level
+    root_logger = logging.getLogger("notetrans")
+    if verbose:
+        root_logger.setLevel(logging.DEBUG)
+    elif quiet:
+        root_logger.setLevel(logging.WARNING)
+
+    ctx.ensure_object(dict)
+    ctx.obj["config"] = load_config(config_path)
 
 
 @cli.command()
@@ -75,11 +97,14 @@ def export(token: str | None, output_dir: Path, include_teams: bool, delay: floa
     failures = export_notes(client, output_dir, include_teams=include_teams)
 
     if failures:
-        click.echo(f"\n{len(failures)} note(s) failed to export:", err=True)
+        logger.error("%d note(s) failed to export:", len(failures))
         for f in failures:
-            click.echo(f"  {f['id'][:8]}  {f['title']}: {f['error']}", err=True)
+            logger.error("  %s  %s: %s", f['id'][:8], f['title'], f['error'])
     else:
-        click.echo("\nAll notes exported successfully.")
+        logger.info("All notes exported successfully.")
+
+
+from notetrans.exporter import export_notes  # noqa: E402
 
 
 @cli.command()
@@ -95,15 +120,18 @@ def export(token: str | None, output_dir: Path, include_teams: bool, delay: floa
     help="Subdirectory to organize (default: personal).",
 )
 @click.option("--dry-run", is_flag=True, help="Preview changes without moving files.")
-def organize(vault_dir: Path, source_dir: str, dry_run: bool) -> None:
+@click.pass_context
+def organize(ctx: click.Context, vault_dir: Path, source_dir: str, dry_run: bool) -> None:
     """Organize vault notes into PARA folder structure."""
     from notetrans.organizer import DELETE, organize_vault
 
-    click.echo(f"Organizing notes in {vault_dir / source_dir}...")
+    config = ctx.obj["config"]
+
+    logger.info("Organizing notes in %s...", vault_dir / source_dir)
     if dry_run:
         click.echo("(dry-run mode - no files will be modified)\n")
 
-    results, stats = organize_vault(vault_dir, source_dir=source_dir, dry_run=dry_run)
+    results, stats = organize_vault(vault_dir, source_dir=source_dir, dry_run=dry_run, config=config)
 
     # Display results grouped by destination
     groups: dict[str, list[str]] = {}
@@ -158,7 +186,9 @@ def organize(vault_dir: Path, source_dir: str, dry_run: bool) -> None:
 )
 @click.option("--dry-run", is_flag=True, help="Preview without creating zettel files.")
 @click.option("--delay", type=float, default=0.5, help="Delay between LLM calls in seconds.")
+@click.pass_context
 def extract(
+    ctx: click.Context,
     vault_dir: Path,
     source_dir: str,
     llm_url: str,
@@ -170,7 +200,9 @@ def extract(
     """Extract Zettelkasten permanent notes from meeting/experiment logs via LLM."""
     from notetrans.extractor import extract_zettels
 
-    click.echo(f"Extracting zettels from {vault_dir / source_dir}...")
+    config = ctx.obj["config"]
+
+    logger.info("Extracting zettels from %s...", vault_dir / source_dir)
     if dry_run:
         click.echo("(dry-run mode - no files will be created)\n")
 
@@ -182,6 +214,7 @@ def extract(
         llm_model=llm_model,
         dry_run=dry_run,
         delay=delay,
+        config=config,
     )
 
     for z in zettels:
@@ -192,3 +225,20 @@ def extract(
     click.echo(f"Notes scanned: {stats.notes_scanned}")
     click.echo(f"Zettels {'found' if dry_run else 'created'}: {stats.zettels_created if not dry_run else len(zettels)}")
     click.echo(f"Errors: {stats.errors}")
+
+
+@cli.command(name="init-config")
+def init_config() -> None:
+    """Generate a default config file at ~/.config/notetrans/config.yaml."""
+    config_dir = DEFAULT_CONFIG_PATH.parent
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    if DEFAULT_CONFIG_PATH.exists():
+        click.echo(f"Config file already exists: {DEFAULT_CONFIG_PATH}")
+        if not click.confirm("Overwrite?"):
+            click.echo("Aborted.")
+            return
+
+    content = generate_default_config()
+    DEFAULT_CONFIG_PATH.write_text(content, encoding="utf-8")
+    click.echo(f"Default config written to {DEFAULT_CONFIG_PATH}")

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +15,10 @@ import yaml
 from notetrans.client import HackMDClient
 from notetrans.converter import convert
 from notetrans.models import Note
+
+logger = logging.getLogger(__name__)
+
+CHECKPOINT_FILENAME = ".notetrans-checkpoint.json"
 
 
 def sanitize_filename(title: str) -> str:
@@ -62,39 +69,94 @@ def build_frontmatter(note: Note) -> str:
     return f"---\n{dumped}---\n\n"
 
 
+def _load_checkpoint(output_dir: Path) -> set[str]:
+    """Load exported IDs from an existing checkpoint file."""
+    cp_path = output_dir / CHECKPOINT_FILENAME
+    if not cp_path.exists():
+        return set()
+    try:
+        data = json.loads(cp_path.read_text(encoding="utf-8"))
+        return set(data.get("exported_ids", []))
+    except (json.JSONDecodeError, OSError):
+        return set()
+
+
+def _save_checkpoint(
+    output_dir: Path, exported_ids: set[str], started_at: str,
+) -> None:
+    """Atomically write checkpoint (write .tmp then rename)."""
+    cp_path = output_dir / CHECKPOINT_FILENAME
+    tmp_path = cp_path.with_suffix(".tmp")
+    data = {
+        "exported_ids": sorted(exported_ids),
+        "started_at": started_at,
+        "last_updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    tmp_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(str(tmp_path), str(cp_path))
+
+
+def _remove_checkpoint(output_dir: Path) -> None:
+    """Remove checkpoint file on successful completion."""
+    cp_path = output_dir / CHECKPOINT_FILENAME
+    if cp_path.exists():
+        cp_path.unlink()
+
+
 def export_notes(
     client: HackMDClient,
     output_dir: Path,
     include_teams: bool = False,
+    resume: bool = True,
 ) -> list[dict]:
     """Export all notes. Returns a list of failure dicts."""
     output_dir.mkdir(parents=True, exist_ok=True)
     failures: list[dict] = []
 
+    # --- Resume / checkpoint ---
+    if resume:
+        exported_ids = _load_checkpoint(output_dir)
+    else:
+        exported_ids = set()
+
+    if exported_ids:
+        logger.info("Resuming: %d previously exported notes will be skipped.", len(exported_ids))
+
+    started_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
     # --- Personal notes ---
-    click.echo("Fetching personal note list...")
+    logger.info("Fetching personal note list...")
     personal_notes = client.list_notes()
-    click.echo(f"Found {len(personal_notes)} personal notes.")
+    logger.info("Found %d personal notes.", len(personal_notes))
 
     personal_dir = output_dir / "personal"
     personal_dir.mkdir(exist_ok=True)
 
-    _export_note_list(client, personal_notes, personal_dir, failures, team_path="")
+    _export_note_list(
+        client, personal_notes, personal_dir, failures,
+        team_path="", exported_ids=exported_ids,
+        output_dir=output_dir, started_at=started_at,
+    )
 
     # --- Team notes ---
     if include_teams:
-        click.echo("Fetching teams...")
+        logger.info("Fetching teams...")
         teams = client.list_teams()
-        click.echo(f"Found {len(teams)} teams.")
+        logger.info("Found %d teams.", len(teams))
         for team in teams:
-            click.echo(f"Fetching notes for team: {team.name} ({team.path})...")
+            logger.info("Fetching notes for team: %s (%s)...", team.name, team.path)
             team_notes = client.list_team_notes(team.path)
-            click.echo(f"  Found {len(team_notes)} notes.")
+            logger.info("  Found %d notes.", len(team_notes))
             team_dir = output_dir / "teams" / team.path
             team_dir.mkdir(parents=True, exist_ok=True)
             _export_note_list(
-                client, team_notes, team_dir, failures, team_path=team.path,
+                client, team_notes, team_dir, failures,
+                team_path=team.path, exported_ids=exported_ids,
+                output_dir=output_dir, started_at=started_at,
             )
+
+    # Clean finish: remove checkpoint
+    _remove_checkpoint(output_dir)
 
     return failures
 
@@ -105,11 +167,16 @@ def _export_note_list(
     dest_dir: Path,
     failures: list[dict],
     team_path: str,
+    exported_ids: set[str],
+    output_dir: Path,
+    started_at: str,
 ) -> None:
     used_names: dict[str, int] = {}
 
     with click.progressbar(notes, label="Exporting", show_pos=True) as bar:
         for note in bar:
+            if note.id in exported_ids:
+                continue
             try:
                 # Fetch full content
                 if team_path:
@@ -140,6 +207,10 @@ def _export_note_list(
 
                 dest = dest_dir / f"{file_name}.md"
                 dest.write_text(md_content, encoding="utf-8")
+
+                # Record success in checkpoint
+                exported_ids.add(note.id)
+                _save_checkpoint(output_dir, exported_ids, started_at)
 
             except Exception as exc:
                 failures.append({

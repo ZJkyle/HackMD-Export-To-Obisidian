@@ -16,16 +16,10 @@ uv.lock
 .env.*
 
 # Personal vault content (notes are private)
-vault/personal/
-vault/teams/
-vault/0-Inbox/
-vault/1-Projects/
-vault/2-Areas/
-vault/3-Resources/
-vault/4-Archive/
+vault/
 
-# Keep Templates as examples
-!vault/Templates/
+# Checkpoint
+.notetrans-checkpoint.json
 
 # IDE
 .vscode/
@@ -33,6 +27,9 @@ vault/4-Archive/
 
 # pytest
 .pytest_cache/
+
+# Ruff
+.ruff_cache/
 
 # Claude
 .claude/

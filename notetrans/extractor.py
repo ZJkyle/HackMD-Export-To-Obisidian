@@ -8,39 +8,22 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import yaml
 
+from notetrans.config import DEFAULT_CONFIG, get_prompt, load_config
 from notetrans.organizer import read_frontmatter, write_frontmatter
 
 
 # ---------------------------------------------------------------------------
-# Config
+# Legacy constants (kept for backward compatibility)
 # ---------------------------------------------------------------------------
 
 DEFAULT_LLM_URL = "http://localhost:8000/v1"
 DEFAULT_LLM_MODEL = "Qwen/Qwen3-VL-8B-Instruct-FP8"
 
-EXTRACT_PROMPT = """\
-你是一位知識管理助手。請閱讀以下會議紀錄/筆記，提取其中值得長期保存的核心知識點。
-
-對每個知識點，輸出一個 JSON 物件：
-- title: 簡短標題（中英皆可）
-- tags: 建議的標籤列表
-- content: 用 Markdown 格式寫出完整的永久筆記，包含：
-  - 核心觀點（一兩句話）
-  - 細節說明
-  - 來源引用（原筆記標題）
-
-如果筆記沒有值得提取的知識點，回傳空陣列。
-輸出格式：JSON array，不要多餘文字。
-
----
-
-筆記標題：{title}
-
-{content}
-"""
+EXTRACT_PROMPT = get_prompt("zh")
 
 # Destination for generated zettel notes
 ZETTEL_DEST = "2-Areas/research"
@@ -75,6 +58,8 @@ def _call_llm(
     llm_url: str = DEFAULT_LLM_URL,
     llm_api_key: str = "",
     llm_model: str = DEFAULT_LLM_MODEL,
+    temperature: float = 0.3,
+    max_tokens: int = 4096,
 ) -> str:
     """Call OpenAI-compatible chat completion API."""
     import requests
@@ -87,8 +72,8 @@ def _call_llm(
     payload = {
         "model": llm_model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": 4096,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     }
 
     resp = requests.post(url, json=payload, headers=headers, timeout=120)
@@ -169,11 +154,34 @@ def extract_zettels(
     llm_model: str = DEFAULT_LLM_MODEL,
     dry_run: bool = False,
     delay: float = 0.5,
+    config: dict[str, Any] | None = None,
 ) -> tuple[list[ZettelNote], ExtractStats]:
     """Scan source_dir for .md files, extract zettel notes via LLM.
 
+    Parameters
+    ----------
+    config:
+        Full configuration dict.  If provided, its ``extractor`` section
+        supplies defaults for *llm_url*, *llm_model*, etc.  Explicit
+        keyword arguments still take priority when they differ from the
+        function-signature defaults.
+
     Returns (zettels, stats).
     """
+    # Resolve settings: explicit kwargs > config > built-in defaults
+    ext_cfg: dict[str, Any] = {}
+    if config is not None:
+        ext_cfg = config.get("extractor", {})
+
+    effective_url = llm_url if llm_url != DEFAULT_LLM_URL else ext_cfg.get("api_base", DEFAULT_LLM_URL)
+    effective_model = llm_model if llm_model != DEFAULT_LLM_MODEL else ext_cfg.get("model", DEFAULT_LLM_MODEL)
+    effective_temperature = ext_cfg.get("temperature", 0.3)
+    effective_max_tokens = ext_cfg.get("max_tokens", 4096)
+    effective_output_dir = ext_cfg.get("output_dir", ZETTEL_DEST)
+    effective_delay = delay if delay != 0.5 else ext_cfg.get("delay", 0.5)
+    prompt_language = ext_cfg.get("prompt_language", "zh")
+    prompt_template = get_prompt(prompt_language)
+
     src = vault_dir / source_dir
     if not src.exists():
         raise FileNotFoundError(f"Source directory not found: {src}")
@@ -182,7 +190,7 @@ def extract_zettels(
     stats = ExtractStats(notes_scanned=len(md_files))
     all_zettels: list[ZettelNote] = []
 
-    dest_dir = vault_dir / ZETTEL_DEST
+    dest_dir = vault_dir / effective_output_dir
     if not dry_run:
         dest_dir.mkdir(parents=True, exist_ok=True)
 
@@ -196,14 +204,16 @@ def extract_zettels(
             continue
 
         # Build prompt
-        prompt = EXTRACT_PROMPT.format(title=title, content=content[:6000])
+        prompt = prompt_template.format(title=title, content=content[:6000])
 
         try:
             raw = _call_llm(
                 prompt,
-                llm_url=llm_url,
+                llm_url=effective_url,
                 llm_api_key=llm_api_key,
-                llm_model=llm_model,
+                llm_model=effective_model,
+                temperature=effective_temperature,
+                max_tokens=effective_max_tokens,
             )
         except Exception:
             stats.errors += 1
@@ -234,7 +244,7 @@ def extract_zettels(
                 dest_path.write_text(md_content, encoding="utf-8")
                 stats.zettels_created += 1
 
-        if delay > 0:
-            time.sleep(delay)
+        if effective_delay > 0:
+            time.sleep(effective_delay)
 
     return all_zettels, stats

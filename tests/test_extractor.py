@@ -187,3 +187,73 @@ class TestExtractZettels:
 
         assert stats.errors == 1
         assert len(zettels) == 0
+
+
+# ---------------------------------------------------------------------------
+# extract_zettels with custom config
+# ---------------------------------------------------------------------------
+
+class TestExtractZettelsWithConfig:
+    def test_custom_output_dir(self, tmp_path):
+        """Config can redirect zettel output to a different folder."""
+        source = tmp_path / "4-Archive" / "meetings"
+        source.mkdir(parents=True)
+        _make_note(source, "meeting1", "Meeting 1", "Discussion about topic " * 20)
+
+        llm_response = json.dumps([
+            {"title": "Custom Zettel", "tags": [], "content": "Insight."}
+        ])
+
+        config = {
+            "extractor": {
+                "output_dir": "5-Zettels/permanent",
+                "temperature": 0.7,
+                "max_tokens": 2048,
+                "prompt_language": "en",
+            },
+        }
+
+        with patch("notetrans.extractor._call_llm", return_value=llm_response) as mock_llm:
+            zettels, stats = extract_zettels(
+                tmp_path,
+                source_dir="4-Archive/meetings",
+                dry_run=False,
+                delay=0,
+                config=config,
+            )
+
+        assert stats.zettels_created == 1
+        dest = tmp_path / "5-Zettels" / "permanent" / "Custom Zettel.md"
+        assert dest.exists()
+
+        # Verify temperature and max_tokens were passed to LLM
+        call_kwargs = mock_llm.call_args
+        assert call_kwargs.kwargs["temperature"] == 0.7
+        assert call_kwargs.kwargs["max_tokens"] == 2048
+
+    def test_english_prompt_used(self, tmp_path):
+        """When prompt_language is 'en', the English prompt template is used."""
+        source = tmp_path / "4-Archive" / "meetings"
+        source.mkdir(parents=True)
+        _make_note(source, "meeting1", "Meeting 1", "Some content here " * 20)
+
+        llm_response = json.dumps([])
+
+        config = {
+            "extractor": {
+                "prompt_language": "en",
+            },
+        }
+
+        with patch("notetrans.extractor._call_llm", return_value=llm_response) as mock_llm:
+            extract_zettels(
+                tmp_path,
+                source_dir="4-Archive/meetings",
+                dry_run=True,
+                delay=0,
+                config=config,
+            )
+
+        # The prompt should contain English text
+        prompt_arg = mock_llm.call_args.args[0]
+        assert "knowledge management assistant" in prompt_arg

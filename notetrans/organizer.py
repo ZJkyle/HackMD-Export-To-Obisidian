@@ -6,8 +6,11 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import yaml
+
+from notetrans.config import DEFAULT_CONFIG, load_config
 
 
 # ---------------------------------------------------------------------------
@@ -58,27 +61,39 @@ class ClassifyResult:
 # Matcher helpers
 # ---------------------------------------------------------------------------
 
-def _is_empty_or_untitled(filepath: Path, title: str, content: str) -> bool:
+def _is_empty_or_untitled(
+    filepath: Path,
+    title: str,
+    content: str,
+    *,
+    empty_min_chars: int = 10,
+    untitled_min_chars: int = 100,
+) -> bool:
     """Note is empty, nearly empty, or has no meaningful title."""
     body = content.strip()
     # Truly empty or only whitespace
-    if len(body) < 10:
+    if len(body) < empty_min_chars:
         return True
     # Title is missing or generic "Untitled"
     if not title or title.strip().lower() == "untitled":
         # But if body has substantial content, keep it
-        if len(body) > 100:
+        if len(body) > untitled_min_chars:
             return False
         return True
     return False
 
 
-def _matches_any(patterns: list[str], text: str) -> bool:
-    """Case-insensitive check if any pattern appears in text."""
-    text_lower = text.lower()
-    for p in patterns:
-        if p.lower() in text_lower:
-            return True
+def _matches_any(patterns: list[str], text: str, *, case_sensitive: bool = False) -> bool:
+    """Check if any pattern appears in text."""
+    if case_sensitive:
+        for p in patterns:
+            if p in text:
+                return True
+    else:
+        text_lower = text.lower()
+        for p in patterns:
+            if p.lower() in text_lower:
+                return True
     return False
 
 
@@ -104,6 +119,7 @@ def _is_paper_note(title: str, content: str) -> bool:
 # Topic tag scanning
 # ---------------------------------------------------------------------------
 
+# Legacy module-level constants kept for backward compatibility
 TOPIC_PATTERNS: list[tuple[str, str]] = [
     ("llama.cpp", "topic/llama-cpp"),
     ("kv cache", "topic/kv-cache"),
@@ -135,25 +151,62 @@ FOLDER_TAG_MAP: dict[str, str] = {
 }
 
 
-def _scan_topic_tags(title: str, content: str) -> list[str]:
+def _scan_topic_tags(
+    title: str,
+    content: str,
+    topics: list[dict[str, str]] | None = None,
+) -> list[str]:
     """Scan title+content for topic keywords, return matching tags."""
     combined = (title + " " + content).lower()
-    tags = set()
-    for keyword, tag in TOPIC_PATTERNS:
-        if keyword.lower() in combined:
-            tags.add(tag)
+    tags: set[str] = set()
+
+    if topics is None:
+        # Use legacy constant
+        for keyword, tag in TOPIC_PATTERNS:
+            if keyword.lower() in combined:
+                tags.add(tag)
+    else:
+        for entry in topics:
+            pattern = entry.get("pattern", "")
+            tag = entry.get("tag", "")
+            if pattern and tag and pattern.lower() in combined:
+                tags.add(tag)
+
     return sorted(tags)
 
 
 # ---------------------------------------------------------------------------
-# Classification rules
+# Classification rules (config-driven)
 # ---------------------------------------------------------------------------
 
-def classify_note(filepath: Path) -> ClassifyResult:
+def classify_note(
+    filepath: Path,
+    config: dict[str, Any] | None = None,
+) -> ClassifyResult:
     """Classify a single note based on filename and content patterns.
+
+    Parameters
+    ----------
+    filepath:
+        Path to the markdown file.
+    config:
+        Full configuration dict (as returned by ``load_config``).
+        If *None*, uses built-in defaults.
 
     Returns a ClassifyResult with destination folder and tags.
     """
+    if config is None:
+        config = DEFAULT_CONFIG
+
+    org_cfg = config.get("organizer", {})
+    rules = org_cfg.get("rules", DEFAULT_CONFIG["organizer"]["rules"])
+    topics = org_cfg.get("topics", DEFAULT_CONFIG["organizer"]["topics"])
+    folder_tags = org_cfg.get("folder_tags", DEFAULT_CONFIG["organizer"]["folder_tags"])
+    delete_empty = org_cfg.get("delete_empty", True)
+    empty_min_chars = org_cfg.get("empty_min_chars", 10)
+    untitled_min_chars = org_cfg.get("untitled_min_chars", 100)
+    inbox_folder = org_cfg.get("inbox_folder", "0-Inbox")
+
     fm, body = read_frontmatter(filepath)
     title = fm.get("title", filepath.stem) or filepath.stem
     filename = filepath.stem
@@ -161,80 +214,39 @@ def classify_note(filepath: Path) -> ClassifyResult:
     match_text = f"{filename} {title} {body[:500]}"
 
     # 1. Delete empty/untitled
-    if _is_empty_or_untitled(filepath, title, body):
+    if delete_empty and _is_empty_or_untitled(
+        filepath, title, body,
+        empty_min_chars=empty_min_chars,
+        untitled_min_chars=untitled_min_chars,
+    ):
         return ClassifyResult(filepath=filepath, dest_folder=DELETE)
 
-    # 2. Projects/thesis
-    if _matches_any(["Proposal", "Paper Writing", "Proposed method",
-                     "口試", "畢業", "碩二咪", "碩博", "國科會"], match_text):
-        dest = "1-Projects/thesis"
+    # 2. Apply rules in order
+    dest: str | None = None
+    for rule in rules:
+        match_type = rule.get("match_type", "keywords")
 
-    # 3. Projects/mypda
-    elif _matches_any(["myPDA", "mypda", "MyPDA"], match_text):
-        dest = "1-Projects/mypda"
+        if match_type == "paper_note":
+            if _is_paper_note(title, body):
+                dest = rule["destination"]
+                break
+        else:
+            keywords = rule.get("keywords", [])
+            case_sensitive = rule.get("case_sensitive", False)
+            if keywords and _matches_any(keywords, match_text, case_sensitive=case_sensitive):
+                dest = rule["destination"]
+                break
 
-    # 4. Projects/client-work
-    elif _matches_any(["BankChat", "Bankchat", "PoliceChat", "Policechat",
-                       "瑛聲", "尊博", "全興"], match_text):
-        dest = "1-Projects/client-work"
-
-    # 5. Archive/meetings
-    elif _matches_any(["Progress Meeting", "Progress meeting", "進度咪",
-                       "Scalable meeting", "BD 例會", "Meet with",
-                       "Meet w", "會議紀錄", "會議記錄"], match_text):
-        dest = "4-Archive/meetings"
-
-    # 6. Resources/papers
-    elif _is_paper_note(title, body):
-        dest = "3-Resources/papers"
-
-    # 7. Resources/courses
-    elif _matches_any(["Assignment", "Homework", "HW", "Lab ",
-                       "ICLAB", "VLSI", "Algorithm", "密碼工程",
-                       "生醫電子", "ACAL", "Arch", "DIC",
-                       "期中考", "期末", "C++ 學習"], match_text):
-        dest = "3-Resources/courses"
-
-    # 8. Resources/tech
-    elif _matches_any(["llama.cpp", "Llama.cpp", "Docker", "Raspberry",
-                       "Rapsberry", "Setup", "Server", "Cluster",
-                       "Cross Compile", "AIAS", "Jetson",
-                       "Environment"], match_text):
-        dest = "3-Resources/tech"
-
-    # 9. Areas/career
-    elif _matches_any(["Interview", "面試", "TSMC"], match_text):
-        dest = "2-Areas/career"
-
-    # 10. Areas/research
-    elif _matches_any(["KV Cache", "Softmax", "MoA", "MOE", "MoE",
-                       "Flash attention", "Splitwise", "StreamLLM",
-                       "inference optimization", "Efficient KV",
-                       "eviction", "hallucination", "Data distillation",
-                       "Data Gen", "Experiment"], match_text):
-        dest = "2-Areas/research"
-
-    # 11. Archive/journal
-    elif _matches_any(["今日", "每日", "排程", "工作表", "Time Table",
-                       "做完的事"], match_text):
-        dest = "4-Archive/journal"
-
-    # 12. Archive/personal
-    elif _matches_any(["烤肉", "Happy New Year", "first song",
-                       "Distance of Blue", "Video making",
-                       "image"], match_text):
-        dest = "4-Archive/personal"
-
-    # 13. Fallback -> Inbox
-    else:
-        dest = "0-Inbox"
+    # 3. Fallback -> Inbox
+    if dest is None:
+        dest = inbox_folder
 
     # Build tags
     tags: list[str] = []
-    folder_tag = FOLDER_TAG_MAP.get(dest)
+    folder_tag = folder_tags.get(dest)
     if folder_tag:
         tags.append(folder_tag)
-    tags.extend(_scan_topic_tags(title, body))
+    tags.extend(_scan_topic_tags(title, body, topics=topics))
 
     return ClassifyResult(filepath=filepath, dest_folder=dest, tags_to_add=tags)
 
@@ -255,8 +267,14 @@ def organize_vault(
     vault_dir: Path,
     source_dir: str = "personal",
     dry_run: bool = False,
+    config: dict[str, Any] | None = None,
 ) -> tuple[list[ClassifyResult], OrganizeStats]:
     """Classify and move all .md files in source_dir into PARA folders.
+
+    Parameters
+    ----------
+    config:
+        Full configuration dict.  If *None*, uses built-in defaults.
 
     Returns (results, stats).
     """
@@ -269,7 +287,7 @@ def organize_vault(
     stats = OrganizeStats(total=len(md_files))
 
     for filepath in md_files:
-        result = classify_note(filepath)
+        result = classify_note(filepath, config=config)
         results.append(result)
 
         if dry_run:
