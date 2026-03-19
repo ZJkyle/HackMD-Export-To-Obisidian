@@ -31,7 +31,7 @@ uv tool install notetrans
 ### From source
 
 ```bash
-git clone https://github.com/OWNER/notetrans.git
+git clone https://github.com/ZJkyle/HackMD-Export-To-Obisidian.git
 cd notetrans
 uv sync
 ```
@@ -232,7 +232,7 @@ source: https://hackmd.io/@user/noteId
 
 ```bash
 # Clone the repository
-git clone https://github.com/OWNER/notetrans.git
+git clone https://github.com/ZJkyle/HackMD-Export-To-Obisidian.git
 cd notetrans
 
 # Install dependencies

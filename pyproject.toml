@@ -28,10 +28,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/OWNER/notetrans"
-Repository = "https://github.com/OWNER/notetrans"
-Changelog = "https://github.com/OWNER/notetrans/blob/main/CHANGELOG.md"
-Issues = "https://github.com/OWNER/notetrans/issues"
+Homepage = "https://github.com/ZJkyle/HackMD-Export-To-Obisidian"
+Repository = "https://github.com/ZJkyle/HackMD-Export-To-Obisidian"
+Changelog = "https://github.com/ZJkyle/HackMD-Export-To-Obisidian/blob/main/CHANGELOG.md"
+Issues = "https://github.com/ZJkyle/HackMD-Export-To-Obisidian/issues"
 
 [project.scripts]
 notetrans = "notetrans.cli:cli"
